@@ -21,7 +21,7 @@ run = "tasks/scripts/cluster.sh"
 hide = true
 
 ["cluster:deploy:supervisor"]
-description = "Fast deploy supervisor binary changes (docker cp into cluster)"
+description = "Fast deploy supervisor image changes"
 run = "tasks/scripts/cluster-deploy-fast.sh supervisor"
 hide = true
 

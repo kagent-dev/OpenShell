@@ -10,6 +10,11 @@ image:
   pullPolicy: Always
   tag: "latest"
 
+supervisor:
+  image:
+    repository: ghcr.io/nvidia/openshell/supervisor
+    tag: ""
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

@@ -38,34 +38,35 @@ When `--from` points to a Dockerfile or directory, the CLI:
 
 ## How It Works
 
-The supervisor binary (`openshell-sandbox`) is **always side-loaded** from the k3s node filesystem via a read-only `hostPath` volume. It is never baked into sandbox images. This applies to all sandbox pods — whether using the default community base image, a custom image, or a user-built Dockerfile.
+The supervisor binary (`openshell-sandbox`) is **always side-loaded** from a dedicated supervisor image via an init container and shared `emptyDir` volume. It is never baked into sandbox images. This applies to all sandbox pods, whether using the default community base image, a custom image, or a user-built Dockerfile.
 
 ```mermaid
 flowchart TB
-    subgraph node["K3s Node"]
-        bin["/opt/openshell/bin/openshell-sandbox
-        (built into cluster image, updatable via docker cp)"]
+    subgraph init["Init Container"]
+        bin["cp /openshell-sandbox
+        /supervisor/openshell-sandbox"]
     end
 
-    node -- "hostPath (readOnly)" --> agent
+    init -- "emptyDir seed" --> agent
 
     subgraph pod["Pod"]
         subgraph agent["Agent Container"]
             agent_desc["Image: community base or custom image
             Command: /opt/openshell/bin/openshell-sandbox
-            Volume: /opt/openshell/bin (ro hostPath)
+            Volume: /opt/openshell/bin (ro emptyDir mount)
             Env: OPENSHELL_SANDBOX_ID, OPENSHELL_ENDPOINT, ...
             Caps: SYS_ADMIN, NET_ADMIN, SYS_PTRACE"]
         end
     end
 ```
 
-The server applies these transforms to every sandbox pod template (`sandbox/mod.rs`):
+The server applies these transforms to every sandbox pod template:
 
-1. Adds a `hostPath` volume named `openshell-supervisor-bin` pointing to `/opt/openshell/bin` on the node.
-2. Mounts it read-only at `/opt/openshell/bin` in the agent container.
-3. Overrides the agent container's `command` to `/opt/openshell/bin/openshell-sandbox`.
-4. Sets `runAsUser: 0` so the supervisor has root privileges for namespace creation, proxy setup, and Landlock/seccomp.
+1. Adds an `emptyDir` volume named `openshell-supervisor-bin`.
+2. Adds an init container named `openshell-supervisor-loader` that copies `/openshell-sandbox` from the supervisor image into that volume.
+3. Mounts the volume read-only at `/opt/openshell/bin` in the agent container.
+4. Overrides the agent container's `command` to `/opt/openshell/bin/openshell-sandbox`.
+5. Sets `runAsUser: 0` so the supervisor has root privileges for namespace creation, proxy setup, and Landlock/seccomp.
 
 These transforms apply to every generated pod template.
 
@@ -109,7 +110,7 @@ The `openshell-sandbox` supervisor adapts to arbitrary environments:
 | Community name resolution | Bare names like `openclaw` expand to the GHCR community registry, making the common case simple |
 | Auto build+push for Dockerfiles | Eliminates the two-step `image push` + `create` workflow for local development |
 | `OPENSHELL_COMMUNITY_REGISTRY` env var | Allows organizations to host their own community sandbox registry |
-| hostPath side-load | Supervisor binary lives on the node filesystem — no init container, no emptyDir, no extra image pull. Faster pod startup. |
+| Init-container side-load | Supervisor binary stays version-locked to the gateway release without depending on node filesystem access or custom node images. |
 | Read-only mount in agent | The supervisor binary is mounted read-only, and the startup seccomp prelude blocks the remount syscalls that would otherwise reopen it for writes once privileged bootstrap has completed. |
 | Command override | Ensures `openshell-sandbox` is the entrypoint regardless of the image's default CMD |
 | Clear `run_as_user/group` for custom images | Prevents startup failure when the image lacks the default `sandbox` user |
@@ -121,4 +122,4 @@ The `openshell-sandbox` supervisor adapts to arbitrary environments:
 
 - Distroless / `FROM scratch` images are not supported (the supervisor needs glibc and `/proc`)
 - Missing `iproute2` (or required capabilities) blocks startup in proxy mode because namespace isolation is mandatory
-- The supervisor binary must be present on the k3s node at `/opt/openshell/bin/openshell-sandbox` (embedded in the cluster image at build time)
+- The supervisor image must be reachable from the cluster so the init container can copy `/openshell-sandbox` into the shared volume

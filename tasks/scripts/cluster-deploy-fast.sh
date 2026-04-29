@@ -137,11 +137,9 @@ if [[ -f "${DEPLOY_FAST_STATE_FILE}" ]]; then
   # Invalidate gateway and helm fingerprints when the cluster container has
   # changed (recreated or replaced).  The new k3s instance has no pushed
   # images so the gateway must be rebuilt and helm must be re-applied.
-  # The supervisor is NOT invalidated here because it is already built into
-  # the cluster image — a fresh cluster already has the correct supervisor
-  # binary, so rebuilding it would be redundant.
   if [[ -n "${current_container_id}" && "${current_container_id}" != "${previous_container_id:-}" ]]; then
     previous_gateway_fingerprint=""
+    previous_supervisor_fingerprint=""
     previous_helm_fingerprint=""
   fi
 fi
@@ -308,11 +306,9 @@ if [[ "${build_gateway}" == "1" ]]; then
   tasks/scripts/docker-build-image.sh gateway
 fi
 
-# Build the supervisor binary and docker cp it into the running k3s cluster.
-# The binary lives at /opt/openshell/bin/openshell-sandbox on the node
-# filesystem and is mounted into sandbox pods via a hostPath volume.
+# Build the supervisor image used by sandbox pod init containers.
 if [[ "${build_supervisor}" == "1" ]]; then
-  echo "Building supervisor binary..."
+  echo "Building supervisor image..."
   supervisor_start=$(date +%s)
 
   # Detect the cluster container's architecture so we cross-compile correctly.
@@ -329,12 +325,7 @@ if [[ "${build_supervisor}" == "1" ]]; then
     x86_64)  HOST_ARCH=amd64 ;;
   esac
 
-  # Build the supervisor binary from the shared image build graph, then
-  # extract it via --output so fast deploys reuse the same Rust cache.
-  SUPERVISOR_BUILD_DIR=$(mktemp -d)
-  trap 'rm -rf "${SUPERVISOR_BUILD_DIR}"' EXIT
-
-  # Compute cargo version from git tags for the supervisor binary.
+  # Compute cargo version from git tags for the supervisor image.
   _cargo_version=${OPENSHELL_CARGO_VERSION:-}
   if [[ -z "${_cargo_version}" ]]; then
     _cargo_version=$(uv run python tasks/scripts/release.py get-version --cargo 2>/dev/null || true)
@@ -351,19 +342,12 @@ if [[ "${build_supervisor}" == "1" ]]; then
 
   env \
   "${_platform_env[@]+"${_platform_env[@]}"}" \
-  DOCKER_OUTPUT="type=local,dest=${SUPERVISOR_BUILD_DIR}" \
   OPENSHELL_CARGO_VERSION="${_cargo_version}" \
-    tasks/scripts/docker-build-image.sh supervisor-output
-
-  # Copy the built binary into the running k3s container
-  ce exec "${CONTAINER_NAME}" mkdir -p /opt/openshell/bin
-  ce cp "${SUPERVISOR_BUILD_DIR}/openshell-sandbox" \
-    "${CONTAINER_NAME}:/opt/openshell/bin/openshell-sandbox"
-  ce exec "${CONTAINER_NAME}" chmod 755 /opt/openshell/bin/openshell-sandbox
+    tasks/scripts/docker-build-image.sh supervisor
 
   built_components+=("supervisor")
   supervisor_end=$(date +%s)
-  log_duration "Supervisor build + deploy" "${supervisor_start}" "${supervisor_end}"
+  log_duration "Supervisor build" "${supervisor_start}" "${supervisor_end}"
 fi
 
 build_end=$(date +%s)
@@ -376,6 +360,11 @@ if [[ "${build_gateway}" == "1" ]]; then
   ce tag "openshell/gateway:${IMAGE_TAG}" "${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}" 2>/dev/null || true
   pushed_images+=("${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}")
   built_components+=("gateway")
+fi
+
+if [[ "${build_supervisor}" == "1" ]]; then
+  ce tag "openshell/supervisor:${IMAGE_TAG}" "${IMAGE_REPO_BASE}/supervisor:${IMAGE_TAG}" 2>/dev/null || true
+  pushed_images+=("${IMAGE_REPO_BASE}/supervisor:${IMAGE_TAG}")
 fi
 
 if [[ "${#pushed_images[@]}" -gt 0 ]]; then
@@ -393,6 +382,12 @@ fi
 if [[ "${build_gateway}" == "1" ]]; then
   echo "Evicting stale gateway image from k3s..."
   ce exec "${CONTAINER_NAME}" crictl rmi "${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}" >/dev/null 2>&1 || true
+fi
+
+if [[ "${build_supervisor}" == "1" ]]; then
+  echo "Evicting stale supervisor image from k3s..."
+  ce exec "${CONTAINER_NAME}" crictl rmi "${IMAGE_REPO_BASE}/supervisor:${IMAGE_TAG}" >/dev/null 2>&1 || true
+  needs_helm_upgrade=1
 fi
 
 if [[ "${needs_helm_upgrade}" == "1" ]]; then
@@ -433,6 +428,8 @@ if [[ "${needs_helm_upgrade}" == "1" ]]; then
     --set image.repository=${IMAGE_REPO_BASE}/gateway \
     --set image.tag=${IMAGE_TAG} \
     --set image.pullPolicy=Always \
+    --set supervisor.image.repository=${IMAGE_REPO_BASE}/supervisor \
+    --set supervisor.image.tag=${IMAGE_TAG} \
     --set-string server.grpcEndpoint=https://openshell.openshell.svc.cluster.local:8080 \
     --set server.tls.certSecretName=openshell-server-tls \
     --set server.tls.clientCaSecretName=openshell-server-client-ca \
@@ -460,9 +457,9 @@ if [[ "${build_gateway}" == "1" ]]; then
 fi
 
 if [[ "${build_supervisor}" == "1" ]]; then
-  echo "Supervisor binary updated on cluster node."
-  echo "Existing sandbox pods will use the new binary on next restart."
-  echo "New sandbox pods will use the updated binary immediately (hostPath mount)."
+  echo "Supervisor image updated in the local registry."
+  echo "New sandbox pods will pull the updated init-container image."
+  echo "Existing sandbox pods will use the new image after restart or recreation."
 fi
 
 if [[ "${explicit_target}" == "0" ]]; then

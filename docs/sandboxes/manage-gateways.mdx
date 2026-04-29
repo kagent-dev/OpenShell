@@ -18,7 +18,7 @@ The gateway is responsible for:
 - Managing inference configuration and serving inference bundles so sandboxes can route requests to the correct backend.
 - Providing the SSH tunnel endpoint so you can connect to sandboxes without exposing them directly.
 
-The gateway runs inside a Docker container and exposes a single port (gRPC and HTTP multiplexed), secured by mTLS by default. No separate Kubernetes installation is required. It can be deployed locally, on a remote host via SSH, or behind a cloud reverse proxy.
+The gateway usually runs inside a Docker container and exposes a single port (gRPC and HTTP multiplexed), secured by mTLS by default. You can also install the same gateway chart into an existing Kubernetes cluster. The gateway can be deployed locally, on a remote host via SSH, in an operator-managed Kubernetes cluster, or behind a cloud reverse proxy.
 
 ## Deploy a Local Gateway
 
@@ -70,6 +70,44 @@ openshell gateway start --remote <username>@<spark-ssid>.local
 ```
 
 </Note>
+
+## Install on Kubernetes
+
+Install the Helm chart into an existing cluster when you want the gateway to run in-cluster and manage sandbox pods with its ServiceAccount.
+
+Create a values file for the minimum plaintext deployment:
+
+```shell
+cat > values.yaml <<'EOF'
+server:
+  disableTls: true
+  disableGatewayAuth: true
+  grpcEndpoint: http://openshell.openshell.svc.cluster.local:8080
+  sshGatewayHost: gateway.example.com
+  sshGatewayPort: 8080
+EOF
+```
+
+Install the chart:
+
+```shell
+helm install openshell deploy/helm/openshell -n openshell --create-namespace -f values.yaml
+```
+
+For local development, reach the gateway with port forwarding:
+
+```shell
+kubectl -n openshell port-forward svc/openshell 8080:8080
+openshell gateway add http://127.0.0.1:8080 --local
+```
+
+For shared use, expose the Service through `NodePort`, `LoadBalancer`, or `Ingress`, then register the externally reachable URL:
+
+```shell
+openshell gateway add http://<reachable-host>:<port>
+```
+
+The chart installs the required ServiceAccount and RBAC automatically. The current minimum permissions are sandbox CRD access in the sandbox namespace, namespaced event reads, and a cluster-scoped read-only `nodes` permission for GPU capacity checks.
 
 ## Register an Existing Gateway
 

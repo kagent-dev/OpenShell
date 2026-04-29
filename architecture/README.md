@@ -207,7 +207,7 @@ The platform produces three container images:
 |---|---|
 | **Sandbox** | Runs inside each sandbox pod. Contains the sandbox supervisor binary, Python runtime, and agent tooling. Uses a multi-user setup (privileged supervisor, restricted agent user). |
 | **Gateway** | Runs the control plane. Contains the gateway binary, database migrations, and an embedded SSH client for sandbox management. |
-| **Cluster** | An airgapped Kubernetes image with k3s, pre-loaded sandbox and gateway images, Helm charts, and an API gateway. This is the single container that users deploy. |
+| **Cluster** | A single-container Kubernetes distribution with k3s, Helm charts, manifests, and bootstrap scripts. The gateway and supervisor images are pulled at runtime. This is the container that `openshell gateway start` deploys. |
 
 Builds use multi-stage Dockerfiles with caching to keep rebuild times fast. A Helm chart handles Kubernetes-level configuration (service ports, health checks, security contexts, resource limits). Build automation is managed through mise tasks.
 

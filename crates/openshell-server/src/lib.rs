@@ -364,6 +364,10 @@ async fn build_compute_runtime(
 ) -> Result<ComputeRuntime> {
     let driver = configured_compute_driver(config)?;
     info!(driver = %driver, "Using compute driver");
+    let supervisor_image = std::env::var("OPENSHELL_SUPERVISOR_IMAGE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| openshell_core::config::DEFAULT_SUPERVISOR_IMAGE.to_string());
 
     match driver {
         ComputeDriverKind::Kubernetes => ComputeRuntime::new_kubernetes(
@@ -371,6 +375,7 @@ async fn build_compute_runtime(
                 namespace: config.sandbox_namespace.clone(),
                 default_image: config.sandbox_image.clone(),
                 image_pull_policy: config.sandbox_image_pull_policy.clone(),
+                supervisor_image: supervisor_image.clone(),
                 grpc_endpoint: config.grpc_endpoint.clone(),
                 // Filesystem path to the supervisor's Unix-socket SSH daemon.
                 // The path lives in a root-only directory so only the
@@ -433,11 +438,6 @@ async fn build_compute_runtime(
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(openshell_core::config::DEFAULT_STOP_TIMEOUT_SECS);
-
-            let supervisor_image = std::env::var("OPENSHELL_SUPERVISOR_IMAGE")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| openshell_core::config::DEFAULT_SUPERVISOR_IMAGE.to_string());
 
             ComputeRuntime::new_podman(
                 openshell_driver_podman::PodmanComputeConfig {

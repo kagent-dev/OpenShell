@@ -311,6 +311,7 @@ impl KubernetesComputeDriver {
             sandbox.spec.as_ref(),
             &self.config.default_image,
             &self.config.image_pull_policy,
+            &self.config.supervisor_image,
             &sandbox.id,
             &sandbox.name,
             &self.config.grpc_endpoint,
@@ -655,27 +656,28 @@ fn map_kube_event_to_platform(
 }
 
 /// Path where the supervisor binary is mounted inside the agent container.
-/// The supervisor is always side-loaded from the k3s node filesystem via a
-/// read-only hostPath volume — it is never baked into sandbox images.
+/// The supervisor is always side-loaded via an init container into a shared
+/// volume. It is never baked into sandbox images.
 const SUPERVISOR_MOUNT_PATH: &str = "/opt/openshell/bin";
 
 /// Name of the volume used to side-load the supervisor binary.
 const SUPERVISOR_VOLUME_NAME: &str = "openshell-supervisor-bin";
 
-/// Path on the k3s node filesystem where the supervisor binary lives.
-/// This is baked into the cluster image at build time and can be updated
-/// via `docker cp` during local development.
-const SUPERVISOR_HOST_PATH: &str = "/opt/openshell/bin";
+/// Name of the init container that seeds the supervisor volume.
+const SUPERVISOR_INIT_CONTAINER_NAME: &str = "openshell-supervisor-loader";
 
-/// Build the hostPath volume definition that exposes the supervisor binary
-/// from the k3s node filesystem.
+/// Writable mount path for the supervisor init container.
+const SUPERVISOR_INIT_MOUNT_PATH: &str = "/supervisor";
+
+/// Path to the supervisor binary inside the supervisor image.
+const SUPERVISOR_IMAGE_PATH: &str = "/openshell-sandbox";
+
+/// Build the shared `emptyDir` volume definition used by the init container
+/// and the agent container.
 fn supervisor_volume() -> serde_json::Value {
     serde_json::json!({
         "name": SUPERVISOR_VOLUME_NAME,
-        "hostPath": {
-            "path": SUPERVISOR_HOST_PATH,
-            "type": "DirectoryOrCreate"
-        }
+        "emptyDir": {}
     })
 }
 
@@ -688,26 +690,53 @@ fn supervisor_volume_mount() -> serde_json::Value {
     })
 }
 
+/// Build the writable volume mount for the init container.
+fn supervisor_loader_volume_mount() -> serde_json::Value {
+    serde_json::json!({
+        "name": SUPERVISOR_VOLUME_NAME,
+        "mountPath": SUPERVISOR_INIT_MOUNT_PATH
+    })
+}
+
+/// Build the init container that copies the supervisor binary into the shared volume.
+fn supervisor_loader_init_container(supervisor_image: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": SUPERVISOR_INIT_CONTAINER_NAME,
+        "image": supervisor_image,
+        "imagePullPolicy": "Always",
+        "command": [
+            "cp",
+            SUPERVISOR_IMAGE_PATH,
+            format!("{SUPERVISOR_INIT_MOUNT_PATH}/openshell-sandbox"),
+        ],
+        "securityContext": {
+            "runAsUser": 0
+        },
+        "volumeMounts": [supervisor_loader_volume_mount()]
+    })
+}
+
 /// Apply supervisor side-load transforms to an already-built pod template JSON.
 ///
-/// This injects the hostPath volume, volume mount, command override, and
+/// This injects the `emptyDir` volume, init container, volume mount, command
+/// override, and
 /// `runAsUser: 0` into the pod template, targeting the `agent` container
 /// (or the first container if no `agent` is found).
 ///
-/// The supervisor binary is always side-loaded from the k3s node filesystem
-/// via a read-only hostPath volume. No init container is needed.
+/// The supervisor binary is always copied from the configured supervisor image
+/// into a shared `emptyDir` volume by an init container.
 ///
 /// The `runAsUser: 0` override ensures the supervisor binary runs as root
 /// regardless of the image's `USER` directive. The supervisor needs root for
 /// network namespace creation, proxy setup, and Landlock/seccomp configuration.
 /// It drops to the appropriate non-root user for child processes via the
 /// policy's `run_as_user`/`run_as_group`.
-fn apply_supervisor_sideload(pod_template: &mut serde_json::Value) {
+fn apply_supervisor_sideload(pod_template: &mut serde_json::Value, supervisor_image: &str) {
     let Some(spec) = pod_template.get_mut("spec").and_then(|v| v.as_object_mut()) else {
         return;
     };
 
-    // 1. Add the hostPath volume to spec.volumes
+    // 1. Add the shared volume to spec.volumes.
     let volumes = spec
         .entry("volumes")
         .or_insert_with(|| serde_json::json!([]))
@@ -716,7 +745,16 @@ fn apply_supervisor_sideload(pod_template: &mut serde_json::Value) {
         volumes.push(supervisor_volume());
     }
 
-    // 2. Find the agent container and add volume mount + command override
+    // 2. Add the init container that copies the supervisor into the shared volume.
+    let init_containers = spec
+        .entry("initContainers")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut();
+    if let Some(init_containers) = init_containers {
+        init_containers.push(supervisor_loader_init_container(supervisor_image));
+    }
+
+    // 3. Find the agent container and add volume mount + command override.
     let Some(containers) = spec.get_mut("containers").and_then(|v| v.as_array_mut()) else {
         return;
     };
@@ -879,6 +917,7 @@ fn sandbox_to_k8s_spec(
     spec: Option<&SandboxSpec>,
     default_image: &str,
     image_pull_policy: &str,
+    supervisor_image: &str,
     sandbox_id: &str,
     sandbox_name: &str,
     grpc_endpoint: &str,
@@ -919,6 +958,7 @@ fn sandbox_to_k8s_spec(
                     spec.gpu,
                     default_image,
                     image_pull_policy,
+                    supervisor_image,
                     sandbox_id,
                     sandbox_name,
                     grpc_endpoint,
@@ -965,6 +1005,7 @@ fn sandbox_to_k8s_spec(
                 spec.as_ref().is_some_and(|s| s.gpu),
                 default_image,
                 image_pull_policy,
+                supervisor_image,
                 sandbox_id,
                 sandbox_name,
                 grpc_endpoint,
@@ -990,6 +1031,7 @@ fn sandbox_template_to_k8s(
     gpu: bool,
     default_image: &str,
     image_pull_policy: &str,
+    supervisor_image: &str,
     sandbox_id: &str,
     sandbox_name: &str,
     grpc_endpoint: &str,
@@ -1001,8 +1043,8 @@ fn sandbox_template_to_k8s(
     host_gateway_ip: &str,
     inject_workspace: bool,
 ) -> serde_json::Value {
-    // The supervisor binary is always side-loaded from the node filesystem
-    // via a hostPath volume, regardless of which sandbox image is used.
+    // The supervisor binary is always side-loaded from a dedicated OCI image,
+    // regardless of which sandbox image is used.
 
     let mut metadata = serde_json::Map::new();
     if !template.labels.is_empty() {
@@ -1120,8 +1162,8 @@ fn sandbox_template_to_k8s(
 
     let mut result = serde_json::Value::Object(template_value);
 
-    // Always side-load the supervisor binary from the node filesystem
-    apply_supervisor_sideload(&mut result);
+    // Always side-load the supervisor binary from the configured supervisor image.
+    apply_supervisor_sideload(&mut result, supervisor_image);
 
     // Inject workspace persistence (init container + PVC volume mount) so
     // that /sandbox data survives pod rescheduling.  Skipped when the user
@@ -1435,7 +1477,10 @@ mod tests {
             }
         });
 
-        apply_supervisor_sideload(&mut pod_template);
+        apply_supervisor_sideload(
+            &mut pod_template,
+            "ghcr.io/nvidia/openshell/supervisor:test",
+        );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
         assert_eq!(sc["runAsUser"], 0, "runAsUser must be 0 for supervisor");
@@ -1459,7 +1504,10 @@ mod tests {
             }
         });
 
-        apply_supervisor_sideload(&mut pod_template);
+        apply_supervisor_sideload(
+            &mut pod_template,
+            "ghcr.io/nvidia/openshell/supervisor:test",
+        );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
         assert_eq!(
@@ -1469,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_sideload_injects_hostpath_volume_and_mount() {
+    fn supervisor_sideload_injects_init_container_emptydir_and_mount() {
         let mut pod_template = serde_json::json!({
             "spec": {
                 "containers": [{
@@ -1479,22 +1527,44 @@ mod tests {
             }
         });
 
-        apply_supervisor_sideload(&mut pod_template);
-
-        // No init containers should be present (hostPath, not emptyDir+init)
-        assert!(
-            pod_template["spec"]["initContainers"].is_null(),
-            "hostPath sideload should not create init containers"
+        apply_supervisor_sideload(
+            &mut pod_template,
+            "ghcr.io/nvidia/openshell/supervisor:test",
         );
 
-        // Volume should be a hostPath volume
+        let init_containers = pod_template["spec"]["initContainers"]
+            .as_array()
+            .expect("initContainers should exist");
+        assert_eq!(init_containers.len(), 1);
+        assert_eq!(init_containers[0]["name"], SUPERVISOR_INIT_CONTAINER_NAME);
+        assert_eq!(
+            init_containers[0]["image"],
+            "ghcr.io/nvidia/openshell/supervisor:test"
+        );
+        assert_eq!(init_containers[0]["imagePullPolicy"], "Always");
+        assert_eq!(
+            init_containers[0]["command"],
+            serde_json::json!([
+                "cp",
+                SUPERVISOR_IMAGE_PATH,
+                format!("{SUPERVISOR_INIT_MOUNT_PATH}/openshell-sandbox")
+            ])
+        );
+        assert_eq!(init_containers[0]["securityContext"]["runAsUser"], 0);
+        let init_mounts = init_containers[0]["volumeMounts"]
+            .as_array()
+            .expect("init container volumeMounts should exist");
+        assert_eq!(init_mounts.len(), 1);
+        assert_eq!(init_mounts[0]["name"], SUPERVISOR_VOLUME_NAME);
+        assert_eq!(init_mounts[0]["mountPath"], SUPERVISOR_INIT_MOUNT_PATH);
+
+        // Volume should be an emptyDir volume.
         let volumes = pod_template["spec"]["volumes"]
             .as_array()
             .expect("volumes should exist");
         assert_eq!(volumes.len(), 1);
         assert_eq!(volumes[0]["name"], SUPERVISOR_VOLUME_NAME);
-        assert_eq!(volumes[0]["hostPath"]["path"], SUPERVISOR_HOST_PATH);
-        assert_eq!(volumes[0]["hostPath"]["type"], "DirectoryOrCreate");
+        assert!(volumes[0]["emptyDir"].is_object());
 
         // Agent container command should be overridden
         let command = pod_template["spec"]["containers"][0]["command"]
@@ -1570,6 +1640,7 @@ mod tests {
             true,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1613,6 +1684,7 @@ mod tests {
             true,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1652,6 +1724,7 @@ mod tests {
             false,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1686,6 +1759,7 @@ mod tests {
             true,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1713,6 +1787,7 @@ mod tests {
             false,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1744,6 +1819,7 @@ mod tests {
             false,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1770,6 +1846,7 @@ mod tests {
             false,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1894,7 +1971,13 @@ mod tests {
 
         apply_workspace_persistence(&mut pod_template, "img:latest", "Always");
 
-        let cmd = pod_template["spec"]["initContainers"][0]["command"]
+        let workspace_init = pod_template["spec"]["initContainers"]
+            .as_array()
+            .expect("initContainers should exist")
+            .iter()
+            .find(|c| c["name"] == WORKSPACE_INIT_CONTAINER_NAME)
+            .expect("workspace init container should exist");
+        let cmd = workspace_init["command"]
             .as_array()
             .expect("command should be an array");
         let script = cmd[2].as_str().expect("third element should be the script");
@@ -1915,6 +1998,7 @@ mod tests {
             false,
             "openshell/sandbox:latest",
             "",
+            "ghcr.io/nvidia/openshell/supervisor:test",
             "sandbox-id",
             "sandbox-name",
             "https://gateway.example.com",
@@ -1928,13 +2012,11 @@ mod tests {
         );
 
         // No init container should be present
-        assert!(
-            pod_template["spec"]["initContainers"].is_null()
-                || pod_template["spec"]["initContainers"]
-                    .as_array()
-                    .is_none_or(|a| a.is_empty()),
-            "workspace init container must NOT be present when inject_workspace is false"
-        );
+        let init_containers = pod_template["spec"]["initContainers"]
+            .as_array()
+            .expect("supervisor init container should exist");
+        assert_eq!(init_containers.len(), 1);
+        assert_eq!(init_containers[0]["name"], SUPERVISOR_INIT_CONTAINER_NAME);
 
         // No workspace volume mount on agent
         let has_workspace_mount = pod_template["spec"]["containers"][0]["volumeMounts"]

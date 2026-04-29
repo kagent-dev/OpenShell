@@ -25,9 +25,13 @@ spec:
   valuesContent: |-
     chartChecksum: __CHART_CHECKSUM__
     image:
-      repository: ghcr.io/nvidia/openshell/gateway
-      tag: latest
+      repository: __GATEWAY_IMAGE_REPOSITORY__
+      tag: __GATEWAY_IMAGE_TAG__
       pullPolicy: __IMAGE_PULL_POLICY__
+    supervisor:
+      image:
+        repository: __SUPERVISOR_IMAGE_REPOSITORY__
+        tag: __SUPERVISOR_IMAGE_TAG__
     server:
       sandboxImage: ghcr.io/nvidia/openshell-community/sandboxes/base:latest
       sandboxImagePullPolicy: __SANDBOX_IMAGE_PULL_POLICY__

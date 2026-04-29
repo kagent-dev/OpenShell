@@ -430,16 +430,17 @@ if [ -n "${IMAGE_REPO_BASE:-}" ] && [ -f "$HELMCHART" ]; then
 fi
 
 # In push mode, use the exact image references that were imported into cluster
-# containerd so the Helm release cannot drift back to remote ":latest" tags.
-# Only the gateway image is pushed; sandbox images are pulled from the
-# community registry at runtime.
+# containerd so the Helm release cannot drift back to remote tags.
+# Sandbox images are still pulled from the community registry at runtime.
 if [ -n "${PUSH_IMAGE_REFS:-}" ] && [ -f "$HELMCHART" ]; then
     server_image=""
+    supervisor_image=""
     old_ifs="$IFS"
     IFS=','
     for ref in $PUSH_IMAGE_REFS; do
         case "$ref" in
             */gateway:*) server_image="$ref" ;;
+            */supervisor:*) supervisor_image="$ref" ;;
         esac
     done
     IFS="$old_ifs"
@@ -449,16 +450,31 @@ if [ -n "${PUSH_IMAGE_REFS:-}" ] && [ -f "$HELMCHART" ]; then
         server_tag="${server_image##*:}"
         echo "Setting server image repository: ${server_repo}"
         echo "Setting server image tag: ${server_tag}"
-        sed -i -E "s|repository:[[:space:]]*[^[:space:]]+|repository: ${server_repo}|" "$HELMCHART"
-        sed -i -E "s|tag:[[:space:]]*\"?[^\"[:space:]]+\"?|tag: \"${server_tag}\"|" "$HELMCHART"
+        sed -i "s|__GATEWAY_IMAGE_REPOSITORY__|${server_repo}|g" "$HELMCHART"
+        sed -i "s|__GATEWAY_IMAGE_TAG__|${server_tag}|g" "$HELMCHART"
+    fi
+
+    if [ -n "$supervisor_image" ]; then
+        supervisor_repo="${supervisor_image%:*}"
+        supervisor_tag="${supervisor_image##*:}"
+        echo "Setting supervisor image repository: ${supervisor_repo}"
+        echo "Setting supervisor image tag: ${supervisor_tag}"
+        sed -i "s|__SUPERVISOR_IMAGE_REPOSITORY__|${supervisor_repo}|g" "$HELMCHART"
+        sed -i "s|__SUPERVISOR_IMAGE_TAG__|${supervisor_tag}|g" "$HELMCHART"
     fi
 fi
 
 if [ -n "${IMAGE_TAG:-}" ] && [ -f "$HELMCHART" ]; then
-    echo "Overriding gateway image tag to: ${IMAGE_TAG}"
-    # server image tag (standalone value field)
-    # Handle both quoted and unquoted defaults: tag: "latest" / tag: latest
-    sed -i -E "s|tag:[[:space:]]*\"?latest\"?|tag: \"${IMAGE_TAG}\"|" "$HELMCHART"
+    echo "Overriding gateway and supervisor image tag to: ${IMAGE_TAG}"
+    sed -i "s|__GATEWAY_IMAGE_TAG__|${IMAGE_TAG}|g" "$HELMCHART"
+    sed -i "s|__SUPERVISOR_IMAGE_TAG__|${IMAGE_TAG}|g" "$HELMCHART"
+fi
+
+if [ -f "$HELMCHART" ]; then
+    sed -i "s|__GATEWAY_IMAGE_REPOSITORY__|ghcr.io/nvidia/openshell/gateway|g" "$HELMCHART"
+    sed -i "s|__GATEWAY_IMAGE_TAG__|latest|g" "$HELMCHART"
+    sed -i "s|__SUPERVISOR_IMAGE_REPOSITORY__|ghcr.io/nvidia/openshell/supervisor|g" "$HELMCHART"
+    sed -i "s|__SUPERVISOR_IMAGE_TAG__|latest|g" "$HELMCHART"
 fi
 
 if [ -f "$HELMCHART" ]; then

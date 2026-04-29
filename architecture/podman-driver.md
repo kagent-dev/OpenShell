@@ -40,7 +40,7 @@ graph TB
 | Execution model | In-process | Standalone subprocess (gRPC over UDS) | In-process |
 | Backend | K8s API (CRD + controller) | libkrun hypervisor (KVM/HVF) | Podman REST API (Unix socket) |
 | Isolation boundary | Container (supervisor inside pod) | Hardware VM | Container (supervisor inside container) |
-| Supervisor delivery | hostPath volume (read-only) | Embedded in rootfs tarball | OCI image volume (read-only) |
+| Supervisor delivery | Init container + `emptyDir` from OCI image | Embedded in rootfs tarball | OCI image volume (read-only) |
 | Network model | Supervisor creates netns inside pod | gvproxy virtio-net (192.168.127.0/24) | Supervisor creates netns inside container |
 | Credential injection | Plaintext env var + K8s Secret volume (0400) | Rootfs file copy (0600) + env vars | Podman `secret_env` API + env vars |
 | GPU support | Yes (nvidia.com/gpu resource) | No | Yes (CDI device) |
@@ -84,7 +84,7 @@ All capabilities are only available to the supervisor process. Sandbox child pro
 
 ## Supervisor Sideloading
 
-The supervisor binary is delivered to sandbox containers via Podman's OCI image volume mechanism, distinct from both the Kubernetes hostPath approach and the VM's embedded rootfs.
+The supervisor binary is delivered to sandbox containers via Podman's OCI image volume mechanism, distinct from both the Kubernetes init-container approach and the VM's embedded rootfs.
 
 ```mermaid
 sequenceDiagram

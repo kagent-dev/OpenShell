@@ -265,11 +265,11 @@ RUN useradd --create-home --user-group openshell
 
 WORKDIR /app
 
-COPY --from=supervisor-binary /build/out/openshell-sandbox /usr/local/bin/
+COPY --from=supervisor-binary /build/out/openshell-sandbox /openshell-sandbox
 
 USER openshell
 
-ENTRYPOINT ["openshell-sandbox"]
+ENTRYPOINT ["/openshell-sandbox"]
 
 # ---------------------------------------------------------------------------
 # Cluster asset stages
@@ -335,7 +335,6 @@ COPY --from=nvidia-container-toolkit /usr/bin/nvidia-cdi-hook /usr/bin/
 COPY --from=nvidia-container-toolkit /usr/bin/nvidia-container-runtime /usr/bin/
 COPY --from=nvidia-container-toolkit /usr/bin/nvidia-ctk /usr/bin/
 COPY --from=nvidia-container-toolkit /etc/nvidia-container-runtime /etc/nvidia-container-runtime
-COPY --from=supervisor-binary /build/out/openshell-sandbox /opt/openshell/bin/openshell-sandbox
 
 RUN mkdir -p /var/lib/rancher/k3s/server/manifests \
              /var/lib/rancher/k3s/server/static/charts \

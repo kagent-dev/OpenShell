@@ -1,6 +1,6 @@
 # Container Images
 
-OpenShell produces two container images, both published for `linux/amd64` and `linux/arm64`.
+OpenShell produces three container images, all published for `linux/amd64` and `linux/arm64`.
 
 ## Gateway (`openshell/gateway`)
 
@@ -11,15 +11,24 @@ The gateway runs the control plane API server. It is deployed as a StatefulSet i
 - **Pulled when**: Cluster startup (the Helm chart triggers the pull)
 - **Entrypoint**: `openshell-gateway --port 8080` (gRPC + HTTP, mTLS)
 
+## Supervisor (`openshell/supervisor`)
+
+The supervisor image carries the `openshell-sandbox` binary used to bootstrap Kubernetes sandbox pods.
+
+- **Docker target**: `supervisor` in `deploy/docker/Dockerfile.images`
+- **Registry**: `ghcr.io/nvidia/openshell/supervisor:latest`
+- **Pulled when**: Sandbox pod init container startup
+- **Entrypoint**: `/openshell-sandbox`
+
 ## Cluster (`openshell/cluster`)
 
-The cluster image is a single-container Kubernetes distribution that bundles the Helm charts, Kubernetes manifests, and the `openshell-sandbox` supervisor binary needed to bootstrap the control plane.
+The cluster image is a single-container Kubernetes distribution that bundles k3s, Helm charts, Kubernetes manifests, and the cluster entrypoint scripts needed to bootstrap the control plane.
 
 - **Docker target**: `cluster` in `deploy/docker/Dockerfile.images`
 - **Registry**: `ghcr.io/nvidia/openshell/cluster:latest`
 - **Pulled when**: `openshell gateway start`
 
-The supervisor binary (`openshell-sandbox`) is built by the shared `supervisor-builder` stage in `deploy/docker/Dockerfile.images` and placed at `/opt/openshell/bin/openshell-sandbox`. It is exposed to sandbox pods at runtime via a read-only `hostPath` volume mount — it is not baked into sandbox images.
+The supervisor binary (`openshell-sandbox`) is built by the shared `supervisor-builder` stage in `deploy/docker/Dockerfile.images`, published as `ghcr.io/nvidia/openshell/supervisor:latest`, and copied into sandbox pods at runtime by an init container. The sandbox image still does not embed the supervisor binary.
 
 ## Standalone Gateway Binary
 
@@ -69,7 +78,7 @@ The incremental deploy (`cluster-deploy-fast.sh`) fingerprints local Git changes
 
 When no local changes are detected, the command is a no-op.
 
-**Gateway updates** are pushed to a local registry and the StatefulSet is restarted. **Supervisor updates** are copied directly into the running cluster container via `docker cp` — new sandbox pods pick up the updated binary immediately through the hostPath mount, with no image rebuild or cluster restart required.
+**Gateway updates** are pushed to a local registry and the StatefulSet is restarted. **Supervisor updates** are pushed as a standalone image, and new sandbox pods pull that image in their init container before copying `/openshell-sandbox` into a shared volume.
 
 Fingerprints are stored in `.cache/cluster-deploy-fast.state`. You can also target specific components explicitly:
 
