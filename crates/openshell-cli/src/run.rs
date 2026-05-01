@@ -1929,10 +1929,12 @@ pub async fn sandbox_create_with_bootstrap(
     providers: &[String],
     policy: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
+    expose: Vec<openshell_core::forward::ForwardSpec>,
     command: &[String],
     tty_override: Option<bool>,
     bootstrap_override: Option<bool>,
     auto_providers_override: Option<bool>,
+    env: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     if !crate::bootstrap::confirm_bootstrap(bootstrap_override)? {
         return Err(miette::miette!(
@@ -1960,11 +1962,13 @@ pub async fn sandbox_create_with_bootstrap(
         providers,
         policy,
         forward,
+        expose,
         command,
         tty_override,
         Some(false),
         auto_providers_override,
         &std::collections::HashMap::new(),
+        env,
         &tls,
     )
     .await
@@ -2016,11 +2020,13 @@ pub async fn sandbox_create(
     providers: &[String],
     policy: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
+    expose: Vec<openshell_core::forward::ForwardSpec>,
     command: &[String],
     tty_override: Option<bool>,
     bootstrap_override: Option<bool>,
     auto_providers_override: Option<bool>,
     labels: &std::collections::HashMap<String, String>,
+    env: &std::collections::HashMap<String, String>,
     tls: &TlsOptions,
 ) -> Result<()> {
     if editor.is_some() && !command.is_empty() {
@@ -2120,6 +2126,7 @@ pub async fn sandbox_create(
             policy,
             providers: configured_providers,
             template,
+            environment: env.clone(),
             ..SandboxSpec::default()
         }),
         name: name.unwrap_or_default().to_string(),
@@ -2457,6 +2464,33 @@ pub async fn sandbox_create(
                     "  Stop with: openshell forward stop {} {sandbox_name}",
                     spec.port,
                 );
+            }
+
+            // Start background forwards for any --expose ports, then exit.
+            // Unlike --forward, --expose does not open a shell afterward.
+            if !expose.is_empty() {
+                for spec in &expose {
+                    sandbox_forward(
+                        &effective_server,
+                        &sandbox_name,
+                        spec,
+                        true, // always background
+                        &effective_tls,
+                    )
+                    .await?;
+                    eprintln!(
+                        "  {} Forwarding port {} to sandbox {sandbox_name} in the background",
+                        "\u{2713}".green().bold(),
+                        spec.port,
+                    );
+                    eprintln!("  Access at: {}", spec.access_url());
+                    eprintln!(
+                        "  Stop with: openshell forward stop {} {sandbox_name}",
+                        spec.port,
+                    );
+                }
+                eprintln!();
+                return Ok(());
             }
 
             if let Some(editor) = editor {

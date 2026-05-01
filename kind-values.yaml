@@ -1,0 +1,15 @@
+image:
+  repository: ghcr.io/nvidia/openshell/gateway
+  tag: latest
+
+supervisor:
+  image:
+    repository: ghcr.io/nvidia/openshell/supervisor
+    tag: latest
+
+server:
+  disableTls: true
+  disableGatewayAuth: true
+  grpcEndpoint: http://openshell.openshell.svc.cluster.local:8080
+  sshGatewayHost: "127.0.0.1"
+  sshGatewayPort: 8080

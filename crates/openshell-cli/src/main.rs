@@ -1162,6 +1162,12 @@ enum SandboxCommands {
         #[arg(long, conflicts_with = "no_keep")]
         forward: Option<String>,
 
+        /// Start a background port forward after the sandbox is ready, then exit.
+        /// Accepts [bind_address:]port (e.g. 8080, 0.0.0.0:8080). Repeatable.
+        /// Unlike --forward, does not open a shell or keep the sandbox alive.
+        #[arg(long = "expose", value_name = "PORT")]
+        expose: Vec<String>,
+
         /// Allocate a pseudo-terminal for the remote command.
         /// Defaults to auto-detection (on when stdin and stdout are terminals).
         /// Use --tty to force a PTY even when auto-detection fails, or
@@ -1200,6 +1206,11 @@ enum SandboxCommands {
         /// Attach labels to the sandbox (key=value format, repeatable).
         #[arg(long = "label")]
         labels: Vec<String>,
+
+        /// Set environment variables in the sandbox (KEY=VALUE format, repeatable).
+        /// Use to pass OPENSHELL_SANDBOX_COMMAND or other variables to the sandbox runtime.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
 
         /// Command to run after "--" (defaults to an interactive shell).
         #[arg(last = true, allow_hyphen_values = true)]
@@ -2312,6 +2323,7 @@ async fn main() -> Result<()> {
                     providers,
                     policy,
                     forward,
+                    expose,
                     tty,
                     no_tty,
                     bootstrap,
@@ -2319,6 +2331,7 @@ async fn main() -> Result<()> {
                     auto_providers,
                     no_auto_providers,
                     labels,
+                    env,
                     command,
                 } => {
                     // Resolve --tty / --no-tty into an Option<bool> override.
@@ -2362,6 +2375,19 @@ async fn main() -> Result<()> {
                         labels_map.insert(parts[0].to_string(), parts[1].to_string());
                     }
 
+                    // Parse --env flags into a HashMap<String, String>.
+                    let mut env_map = std::collections::HashMap::new();
+                    for env_str in &env {
+                        let parts: Vec<&str> = env_str.splitn(2, '=').collect();
+                        if parts.len() != 2 {
+                            return Err(miette::miette!(
+                                "invalid env format '{}', expected KEY=VALUE",
+                                env_str
+                            ));
+                        }
+                        env_map.insert(parts[0].to_string(), parts[1].to_string());
+                    }
+
                     // Parse --upload spec into (local_path, sandbox_path, git_ignore).
                     let upload_spec = upload.as_deref().map(|s| {
                         let (local, remote) = parse_upload_spec(s);
@@ -2372,6 +2398,10 @@ async fn main() -> Result<()> {
                     let forward = forward
                         .map(|s| openshell_core::forward::ForwardSpec::parse(&s))
                         .transpose()?;
+                    let expose_specs = expose
+                        .iter()
+                        .map(|s| openshell_core::forward::ForwardSpec::parse(s))
+                        .collect::<Result<Vec<_>>>()?;
                     let keep = keep || !no_keep || editor.is_some() || forward.is_some();
 
                     // For `sandbox create`, a missing cluster is not fatal — the
@@ -2408,11 +2438,13 @@ async fn main() -> Result<()> {
                                 &providers,
                                 policy.as_deref(),
                                 forward,
+                                expose_specs.clone(),
                                 &command,
                                 tty_override,
                                 Some(false),
                                 auto_providers_override,
                                 &labels_map,
+                                &env_map,
                                 &tls,
                             ))
                             .await?;
@@ -2431,10 +2463,12 @@ async fn main() -> Result<()> {
                                 &providers,
                                 policy.as_deref(),
                                 forward,
+                                expose_specs,
                                 &command,
                                 tty_override,
                                 bootstrap_override,
                                 auto_providers_override,
+                                &env_map,
                             ))
                             .await?;
                         }

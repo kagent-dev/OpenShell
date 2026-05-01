@@ -699,11 +699,13 @@ fn supervisor_loader_volume_mount() -> serde_json::Value {
 }
 
 /// Build the init container that copies the supervisor binary into the shared volume.
-fn supervisor_loader_init_container(supervisor_image: &str) -> serde_json::Value {
-    serde_json::json!({
+fn supervisor_loader_init_container(
+    supervisor_image: &str,
+    image_pull_policy: &str,
+) -> serde_json::Value {
+    let mut container = serde_json::json!({
         "name": SUPERVISOR_INIT_CONTAINER_NAME,
         "image": supervisor_image,
-        "imagePullPolicy": "Always",
         "command": [
             "cp",
             SUPERVISOR_IMAGE_PATH,
@@ -713,7 +715,11 @@ fn supervisor_loader_init_container(supervisor_image: &str) -> serde_json::Value
             "runAsUser": 0
         },
         "volumeMounts": [supervisor_loader_volume_mount()]
-    })
+    });
+    if !image_pull_policy.is_empty() {
+        container["imagePullPolicy"] = serde_json::json!(image_pull_policy);
+    }
+    container
 }
 
 /// Apply supervisor side-load transforms to an already-built pod template JSON.
@@ -731,7 +737,11 @@ fn supervisor_loader_init_container(supervisor_image: &str) -> serde_json::Value
 /// network namespace creation, proxy setup, and Landlock/seccomp configuration.
 /// It drops to the appropriate non-root user for child processes via the
 /// policy's `run_as_user`/`run_as_group`.
-fn apply_supervisor_sideload(pod_template: &mut serde_json::Value, supervisor_image: &str) {
+fn apply_supervisor_sideload(
+    pod_template: &mut serde_json::Value,
+    supervisor_image: &str,
+    image_pull_policy: &str,
+) {
     let Some(spec) = pod_template.get_mut("spec").and_then(|v| v.as_object_mut()) else {
         return;
     };
@@ -751,7 +761,7 @@ fn apply_supervisor_sideload(pod_template: &mut serde_json::Value, supervisor_im
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut();
     if let Some(init_containers) = init_containers {
-        init_containers.push(supervisor_loader_init_container(supervisor_image));
+        init_containers.push(supervisor_loader_init_container(supervisor_image, image_pull_policy));
     }
 
     // 3. Find the agent container and add volume mount + command override.
@@ -1163,7 +1173,7 @@ fn sandbox_template_to_k8s(
     let mut result = serde_json::Value::Object(template_value);
 
     // Always side-load the supervisor binary from the configured supervisor image.
-    apply_supervisor_sideload(&mut result, supervisor_image);
+    apply_supervisor_sideload(&mut result, supervisor_image, image_pull_policy);
 
     // Inject workspace persistence (init container + PVC volume mount) so
     // that /sandbox data survives pod rescheduling.  Skipped when the user
@@ -1281,7 +1291,7 @@ fn apply_required_env(
     upsert_env(env, "OPENSHELL_SANDBOX_ID", sandbox_id);
     upsert_env(env, "OPENSHELL_SANDBOX", sandbox_name);
     upsert_env(env, "OPENSHELL_ENDPOINT", grpc_endpoint);
-    upsert_env(env, "OPENSHELL_SANDBOX_COMMAND", "sleep infinity");
+    set_env_default(env, "OPENSHELL_SANDBOX_COMMAND", "sleep infinity");
     if !ssh_socket_path.is_empty() {
         upsert_env(env, "OPENSHELL_SSH_SOCKET_PATH", ssh_socket_path);
     }
@@ -1306,6 +1316,18 @@ fn apply_required_env(
             "/etc/openshell-tls/client/tls.key",
         );
     }
+}
+
+/// Sets `name=value` only if `name` is not already present in the env list.
+/// Use for optional defaults that callers may override via template environment.
+fn set_env_default(env: &mut Vec<serde_json::Value>, name: &str, value: &str) {
+    if env
+        .iter()
+        .any(|item| item.get("name").and_then(|v| v.as_str()) == Some(name))
+    {
+        return;
+    }
+    env.push(serde_json::json!({"name": name, "value": value}));
 }
 
 fn upsert_env(env: &mut Vec<serde_json::Value>, name: &str, value: &str) {
@@ -1480,6 +1502,7 @@ mod tests {
         apply_supervisor_sideload(
             &mut pod_template,
             "ghcr.io/nvidia/openshell/supervisor:test",
+            "",
         );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
@@ -1507,6 +1530,7 @@ mod tests {
         apply_supervisor_sideload(
             &mut pod_template,
             "ghcr.io/nvidia/openshell/supervisor:test",
+            "",
         );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
@@ -1530,6 +1554,7 @@ mod tests {
         apply_supervisor_sideload(
             &mut pod_template,
             "ghcr.io/nvidia/openshell/supervisor:test",
+            "",
         );
 
         let init_containers = pod_template["spec"]["initContainers"]
@@ -1541,7 +1566,7 @@ mod tests {
             init_containers[0]["image"],
             "ghcr.io/nvidia/openshell/supervisor:test"
         );
-        assert_eq!(init_containers[0]["imagePullPolicy"], "Always");
+        assert_eq!(init_containers[0]["imagePullPolicy"], serde_json::Value::Null);
         assert_eq!(
             init_containers[0]["command"],
             serde_json::json!([
